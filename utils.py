@@ -1,12 +1,17 @@
 import requests
 import tempfile
 import os
+import pdfplumber
 from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, UnstructuredEmailLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_openai import ChatOpenAI
 from langchain.chains import RetrievalQA
+from langchain_community.retrievers import BM25Retriever
+from langchain.retrievers import EnsembleRetriever, ContextualCompressionRetriever
+from langchain.retrievers.document_compressors import FlashrankRerank
+from langchain.docstore.document import Document
 from prompts import QA_PROMPT
 
 def download_document(url: str) -> bytes:
@@ -25,43 +30,70 @@ def load_and_chunk_document(content: bytes, url: str) -> list:
         tmp_path = tmp.name
 
     if ext == 'pdf':
-        loader = PyPDFLoader(tmp_path)
+        # Enhanced PDF parsing with structure preservation using pdfplumber
+        with pdfplumber.open(tmp_path) as pdf:
+            text_pages = []
+            for i, page in enumerate(pdf.pages):
+                text = page.extract_text() or ""  # Handle empty pages
+                text_pages.append(f"Page {i+1}:\n{text}")  # Add page metadata
+            full_text = '\n\n'.join(text_pages)
+        docs = [Document(page_content=full_text, metadata={"source": url})]  # Single doc with all pages
     elif ext == 'docx':
         loader = Docx2txtLoader(tmp_path)
+        docs = loader.load()
     elif ext in ['eml', 'msg']:  # Assume email
         loader = UnstructuredEmailLoader(tmp_path)
+        docs = loader.load()
     else:
         raise ValueError(f"Unsupported format: {ext}. Supported formats: pdf, docx, eml, msg")
-
-    docs = loader.load()
     os.remove(tmp_path)  # Clean up
 
-    # Chunk for semantic search: small size for precision
-    splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=150)
+    # Enhanced chunking for better context capture - structure-aware splitting for policies
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1500,  # Larger for full clauses
+        chunk_overlap=300,  # More overlap to bridge splits
+        separators=['\n\n', '\n', '.', 'Section ', 'Clause ', 'Article ', 'Policy ', 'Sub-limit ']  # Custom for insurance docs
+    )
     chunks = splitter.split_documents(docs)
     return chunks
 
-def build_vectorstore(chunks: list) -> FAISS:
-    """Build FAISS vector store with OpenAI embeddings."""
+def build_vectorstore(chunks: list) -> tuple:
+    """Build FAISS vector store with OpenAI embeddings and return chunks for hybrid retrieval."""
     embeddings = OpenAIEmbeddings(model="text-embedding-ada-002")  # Accurate, efficient
     vectorstore = FAISS.from_documents(chunks, embeddings)
-    return vectorstore
+    return vectorstore, chunks
 
-def query_llm(vectorstore: FAISS, question: str) -> str:
-    """Query LLM with retrieved context for accurate, explainable answer."""
-    llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0, max_tokens=500)  # Factual, token-efficient
+def query_llm(vectorstore: FAISS, chunks: list, question: str) -> str:
+    """Query LLM with hybrid retrieval and reranking for accurate, explainable answer."""
+    # Use better GPT variant and optimize post-processing
+    llm = ChatOpenAI(model="gpt-3.5-turbo-0125", temperature=0, max_tokens=500)  # Latest model variant
+    
+    # Hybrid retrieval: Semantic + Keyword
+    semantic_retriever = vectorstore.as_retriever(search_kwargs={"k": 10})  # Broader search
+    bm25_retriever = BM25Retriever.from_documents(chunks, k=10)
+    ensemble_retriever = EnsembleRetriever(
+        retrievers=[semantic_retriever, bm25_retriever],
+        weights=[0.5, 0.5]  # Equal balance
+    )
+    
+    # Add reranking for retrieved chunks
+    compressor = FlashrankRerank(top_n=5)  # Rerank to best 5
+    rerank_retriever = ContextualCompressionRetriever(
+        base_compressor=compressor,
+        base_retriever=ensemble_retriever
+    )
+    
     qa_chain = RetrievalQA.from_chain_type(
         llm=llm,
         chain_type="stuff",  # Stuff context for simplicity/accuracy
-        retriever=vectorstore.as_retriever(search_kwargs={"k": 5}),  # Top-5 for good recall
+        retriever=rerank_retriever,  # Use hybrid + reranked retriever
         return_source_documents=True,  # For internal traceability
         chain_type_kwargs={"prompt": QA_PROMPT}  # Custom prompt for explainability
     )
     result = qa_chain({"query": question})
     answer = result["result"].strip()
     
-    # Optional: Append sources for extra traceability (e.g., pages)
-    # sources = [f"Page {doc.metadata.get('page', 'N/A')}" for doc in result["source_documents"]]
-    # answer += f" (Sources: {', '.join(sources)})"
+    # Post-processing for sample alignment
+    answer = answer.rstrip('.').strip()  # Remove trailing periods, extra spaces
     
     return answer

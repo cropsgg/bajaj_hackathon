@@ -39,12 +39,12 @@ async def run_query(input_data: InputData, token: str = Depends(verify_token)):
         chunks = load_and_chunk_document(doc_content, input_data.documents)
         
         # Step 3: Build vector store
-        vectorstore = build_vectorstore(chunks)
+        vectorstore, chunks = build_vectorstore(chunks)
         
         # Step 4: Process each question
         answers: List[str] = []
         for question in input_data.questions:
-            answer = query_llm(vectorstore, question)
+            answer = query_llm(vectorstore, chunks, question)
             answers.append(answer)
         
         return OutputData(answers=answers)
