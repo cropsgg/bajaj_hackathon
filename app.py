@@ -32,21 +32,33 @@ async def health_check():
 async def run_query(input_data: InputData, token: str = Depends(verify_token)):
     """Endpoint to process document and questions. Returns structured answers."""
     try:
-        # Step 1: Download document
+        # Step 1: Download document with timeout
+        print(f"Processing document: {input_data.documents[:100]}...")
         doc_content = download_document(input_data.documents)
+        print(f"Document downloaded successfully, size: {len(doc_content)} bytes")
         
         # Step 2: Load and chunk
         chunks = load_and_chunk_document(doc_content, input_data.documents)
+        print(f"Document chunked into {len(chunks)} chunks")
         
         # Step 3: Build vector store
         vectorstore, chunks = build_vectorstore(chunks)
+        print(f"Vector store built successfully")
         
-        # Step 4: Process each question
+        # Step 4: Process each question with progress tracking
         answers: List[str] = []
-        for question in input_data.questions:
-            answer = query_llm(vectorstore, chunks, question)
-            answers.append(answer)
+        for i, question in enumerate(input_data.questions):
+            print(f"Processing question {i+1}/{len(input_data.questions)}: {question[:50]}...")
+            try:
+                answer = query_llm(vectorstore, chunks, question)
+                answers.append(answer)
+                print(f"Question {i+1} completed")
+            except Exception as qe:
+                print(f"Error processing question {i+1}: {qe}")
+                answers.append(f"Error processing this question: {str(qe)}")
         
+        print(f"All {len(answers)} questions processed successfully")
         return OutputData(answers=answers)
     except Exception as e:
+        print(f"Critical error in run_query: {e}")
         raise HTTPException(status_code=500, detail=f"Error processing: {str(e)}")

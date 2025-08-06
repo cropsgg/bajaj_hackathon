@@ -65,8 +65,13 @@ def build_vectorstore(chunks: list) -> tuple:
 
 def query_llm(vectorstore: FAISS, chunks: list, question: str) -> str:
     """Query LLM with hybrid retrieval and reranking for accurate, explainable answer."""
-    # Use better GPT variant and optimize post-processing
-    llm = ChatOpenAI(model="gpt-3.5-turbo-0125", temperature=0, max_tokens=500)  # Latest model variant
+    # Use better GPT variant and optimize post-processing with timeout handling
+    llm = ChatOpenAI(
+        model="gpt-3.5-turbo-0125", 
+        temperature=0, 
+        max_tokens=500,
+        request_timeout=30  # Add timeout to prevent hanging
+    )
     
     # Hybrid retrieval: Semantic + Keyword
     semantic_retriever = vectorstore.as_retriever(search_kwargs={"k": 10})  # Broader search
@@ -76,12 +81,16 @@ def query_llm(vectorstore: FAISS, chunks: list, question: str) -> str:
         weights=[0.5, 0.5]  # Equal balance
     )
     
-    # Add reranking for retrieved chunks
-    compressor = FlashrankRerank(top_n=5)  # Rerank to best 5
-    rerank_retriever = ContextualCompressionRetriever(
-        base_compressor=compressor,
-        base_retriever=ensemble_retriever
-    )
+    # Add reranking for retrieved chunks with error handling
+    try:
+        compressor = FlashrankRerank(top_n=5)  # Rerank to best 5
+        rerank_retriever = ContextualCompressionRetriever(
+            base_compressor=compressor,
+            base_retriever=ensemble_retriever
+        )
+    except Exception as e:
+        print(f"Warning: Reranking failed, falling back to ensemble retriever: {e}")
+        rerank_retriever = ensemble_retriever
     
     qa_chain = RetrievalQA.from_chain_type(
         llm=llm,
@@ -90,10 +99,15 @@ def query_llm(vectorstore: FAISS, chunks: list, question: str) -> str:
         return_source_documents=True,  # For internal traceability
         chain_type_kwargs={"prompt": QA_PROMPT}  # Custom prompt for explainability
     )
-    result = qa_chain({"query": question})
-    answer = result["result"].strip()
-    
-    # Post-processing for sample alignment
-    answer = answer.rstrip('.').strip()  # Remove trailing periods, extra spaces
-    
-    return answer
+    # Use invoke instead of deprecated __call__ with error handling
+    try:
+        result = qa_chain.invoke({"query": question})
+        answer = result["result"].strip()
+        
+        # Post-processing for sample alignment
+        answer = answer.rstrip('.').strip()  # Remove trailing periods, extra spaces
+        
+        return answer
+    except Exception as e:
+        print(f"Error in QA chain: {e}")
+        return f"Error processing question: {str(e)}"
