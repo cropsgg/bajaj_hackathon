@@ -1,8 +1,9 @@
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.middleware.cors import CORSMiddleware
 from models import InputData, OutputData
 from utils import download_document, load_and_chunk_document, build_vectorstore, query_llm
-from typing import List
+from typing import List, Optional
 import os
 from dotenv import load_dotenv
 
@@ -15,6 +16,15 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# Add CORS middleware to allow cross-origin requests
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
+)
+
 security = HTTPBearer()
 
 # Authentication check (as per spec)
@@ -25,8 +35,57 @@ async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(secur
 
 @app.get("/")
 async def health_check():
-    """Health check endpoint for Railway deployment."""
-    return {"status": "healthy", "message": "HackRX Intelligent Query-Retrieval System is running"}
+    """Health check endpoint for Railway deployment with API documentation."""
+    return {
+        "status": "healthy", 
+        "message": "HackRX Intelligent Query-Retrieval System is running",
+        "api_docs": "/docs",
+        "main_endpoint": {
+            "url": "/hackrx/run",
+            "method": "POST",
+            "auth": "Bearer a2f387310984b739ae7e4accffad70a62e5673145dd05bc749dc913c0e6d0c42",
+            "sample_request": {
+                "documents": "https://example.com/document.pdf",
+                "questions": ["What is the waiting period for maternity benefits?"]
+            }
+        }
+    }
+
+@app.get("/hackrx/run")
+async def hackrx_run_info():
+    """GET endpoint for /hackrx/run to provide usage information."""
+    return {
+        "message": "HackRX Intelligent Query-Retrieval System",
+        "usage": "This endpoint accepts POST requests only",
+        "method": "POST",
+        "content_type": "application/json",
+        "authorization": "Bearer a2f387310984b739ae7e4accffad70a62e5673145dd05bc749dc913c0e6d0c42",
+        "request_format": {
+            "documents": "URL to the document (PDF, DOCX, Email)",
+            "questions": ["List of natural language queries"]
+        },
+        "response_format": {
+            "answers": ["List of structured, explainable answers"]
+        },
+        "example_curl": 'curl -X POST "YOUR_RAILWAY_URL/hackrx/run" -H "Authorization: Bearer a2f387310984b739ae7e4accffad70a62e5673145dd05bc749dc913c0e6d0c42" -H "Content-Type: application/json" -d \'{"documents": "https://example.com/policy.pdf", "questions": ["What is the grace period?"]}\'',
+        "interactive_docs": "/docs",
+        "test_endpoint": "/test"
+    }
+
+@app.get("/test")
+async def test_endpoint():
+    """Simple test endpoint to verify deployment and CORS."""
+    return {
+        "status": "success",
+        "message": "API is working correctly",
+        "timestamp": "2024-01-01T00:00:00Z",
+        "endpoints": {
+            "health": "/",
+            "main_api": "/hackrx/run (POST)",
+            "api_info": "/hackrx/run (GET)",
+            "docs": "/docs"
+        }
+    }
 
 @app.post("/hackrx/run", response_model=OutputData)
 async def run_query(input_data: InputData, token: str = Depends(verify_token)):
