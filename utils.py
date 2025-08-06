@@ -64,50 +64,32 @@ def build_vectorstore(chunks: list) -> tuple:
     return vectorstore, chunks
 
 def query_llm(vectorstore: FAISS, chunks: list, question: str) -> str:
-    """Query LLM with hybrid retrieval and reranking for accurate, explainable answer."""
-    # Use better GPT variant and optimize post-processing with timeout handling
-    llm = ChatOpenAI(
-        model="gpt-3.5-turbo-0125", 
-        temperature=0, 
-        max_tokens=500,
-        request_timeout=30  # Add timeout to prevent hanging
-    )
-    
-    # Hybrid retrieval: Semantic + Keyword with fallback
-    semantic_retriever = vectorstore.as_retriever(search_kwargs={"k": 5})  # Start with smaller k
-    
+    """Simplified query LLM for Railway deployment stability."""
     try:
-        bm25_retriever = BM25Retriever.from_documents(chunks, k=5)
-        ensemble_retriever = EnsembleRetriever(
-            retrievers=[semantic_retriever, bm25_retriever],
-            weights=[0.5, 0.5]  # Equal balance
+        # Simplified LLM configuration for Railway
+        llm = ChatOpenAI(
+            model="gpt-3.5-turbo", 
+            temperature=0, 
+            max_tokens=300,  # Reduced for faster response
+            request_timeout=25  # Shorter timeout
         )
-        print("Using hybrid semantic + BM25 retrieval")
-    except Exception as e:
-        print(f"BM25 retriever failed, using semantic only: {e}")
-        ensemble_retriever = semantic_retriever
-    
-    # Temporarily disable reranking for Railway deployment stability
-    # FlashRank may have compatibility issues on Railway's environment
-    rerank_retriever = ensemble_retriever  # Use ensemble directly for now
-    print("Using ensemble retriever without reranking for Railway deployment")
-    
-    qa_chain = RetrievalQA.from_chain_type(
-        llm=llm,
-        chain_type="stuff",  # Stuff context for simplicity/accuracy
-        retriever=rerank_retriever,  # Use hybrid + reranked retriever
-        return_source_documents=True,  # For internal traceability
-        chain_type_kwargs={"prompt": QA_PROMPT}  # Custom prompt for explainability
-    )
-    # Use invoke instead of deprecated __call__ with error handling
-    try:
+        
+        # Use simple semantic retrieval only for Railway stability
+        retriever = vectorstore.as_retriever(search_kwargs={"k": 3})  # Smaller k for speed
+        print("Using simple semantic retrieval for Railway deployment")
+        
+        qa_chain = RetrievalQA.from_chain_type(
+            llm=llm,
+            chain_type="stuff",
+            retriever=retriever,
+            return_source_documents=False,  # Disable for speed
+            chain_type_kwargs={"prompt": QA_PROMPT}
+        )
+        
         result = qa_chain.invoke({"query": question})
         answer = result["result"].strip()
+        return answer.rstrip('.').strip()
         
-        # Post-processing for sample alignment
-        answer = answer.rstrip('.').strip()  # Remove trailing periods, extra spaces
-        
-        return answer
     except Exception as e:
-        print(f"Error in QA chain: {e}")
-        return f"Error processing question: {str(e)}"
+        print(f"Error in simplified QA chain: {e}")
+        return f"Unable to process question due to system constraints."
