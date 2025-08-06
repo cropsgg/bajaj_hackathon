@@ -73,24 +73,24 @@ def query_llm(vectorstore: FAISS, chunks: list, question: str) -> str:
         request_timeout=30  # Add timeout to prevent hanging
     )
     
-    # Hybrid retrieval: Semantic + Keyword
-    semantic_retriever = vectorstore.as_retriever(search_kwargs={"k": 10})  # Broader search
-    bm25_retriever = BM25Retriever.from_documents(chunks, k=10)
-    ensemble_retriever = EnsembleRetriever(
-        retrievers=[semantic_retriever, bm25_retriever],
-        weights=[0.5, 0.5]  # Equal balance
-    )
+    # Hybrid retrieval: Semantic + Keyword with fallback
+    semantic_retriever = vectorstore.as_retriever(search_kwargs={"k": 5})  # Start with smaller k
     
-    # Add reranking for retrieved chunks with error handling
     try:
-        compressor = FlashrankRerank(top_n=5)  # Rerank to best 5
-        rerank_retriever = ContextualCompressionRetriever(
-            base_compressor=compressor,
-            base_retriever=ensemble_retriever
+        bm25_retriever = BM25Retriever.from_documents(chunks, k=5)
+        ensemble_retriever = EnsembleRetriever(
+            retrievers=[semantic_retriever, bm25_retriever],
+            weights=[0.5, 0.5]  # Equal balance
         )
+        print("Using hybrid semantic + BM25 retrieval")
     except Exception as e:
-        print(f"Warning: Reranking failed, falling back to ensemble retriever: {e}")
-        rerank_retriever = ensemble_retriever
+        print(f"BM25 retriever failed, using semantic only: {e}")
+        ensemble_retriever = semantic_retriever
+    
+    # Temporarily disable reranking for Railway deployment stability
+    # FlashRank may have compatibility issues on Railway's environment
+    rerank_retriever = ensemble_retriever  # Use ensemble directly for now
+    print("Using ensemble retriever without reranking for Railway deployment")
     
     qa_chain = RetrievalQA.from_chain_type(
         llm=llm,
