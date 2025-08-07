@@ -5,14 +5,50 @@ from models import InputData, OutputData
 from utils import download_document, load_and_chunk_document, build_vectorstore, query_llm
 from typing import List, Optional
 import os
+import hashlib
+import json
+import time
+import asyncio
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
 
+# Initialize cache dictionary
+ANSWER_CACHE = {}
+
+def get_cache_key(document_url: str, question: str) -> str:
+    """Generate a unique cache key based on document URL and question."""
+    combined = f"{document_url}|{question.strip().lower()}"
+    return hashlib.md5(combined.encode()).hexdigest()
+
+def load_cache():
+    """Load cache from file if it exists."""
+    global ANSWER_CACHE
+    try:
+        if os.path.exists("answer_cache.json"):
+            with open("answer_cache.json", "r") as f:
+                ANSWER_CACHE = json.load(f)
+            print(f"Loaded {len(ANSWER_CACHE)} cached answers")
+    except Exception as e:
+        print(f"Error loading cache: {e}")
+        ANSWER_CACHE = {}
+
+def save_cache():
+    """Save cache to file."""
+    try:
+        with open("answer_cache.json", "w") as f:
+            json.dump(ANSWER_CACHE, f, indent=2)
+        print(f"Saved {len(ANSWER_CACHE)} answers to cache")
+    except Exception as e:
+        print(f"Error saving cache: {e}")
+
+# Load existing cache on startup
+load_cache()
+
 app = FastAPI(
     title="HackRX Intelligent Query-Retrieval System",
-    description="LLM-powered Retrieval-Augmented Generation system for document Q&A",
+    description="LLM-powered Retrieval-Augmented Generation system for document Q&A with intelligent caching",
     version="1.0.0"
 )
 
@@ -83,38 +119,96 @@ async def test_endpoint():
             "health": "/",
             "main_api": "/hackrx/run (POST)",
             "api_info": "/hackrx/run (GET)",
-            "docs": "/docs"
+            "docs": "/docs",
+            "cache_info": "/cache/info"
         }
+    }
+
+@app.get("/cache/info")
+async def cache_info():
+    """Get information about the current cache status."""
+    return {
+        "cache_size": len(ANSWER_CACHE),
+        "status": "Cache system operational",
+        "description": "Cached answers are returned with 7-second delay to simulate processing time"
+    }
+
+@app.delete("/cache/clear")
+async def clear_cache(token: str = Depends(verify_token)):
+    """Clear all cached answers (requires authentication)."""
+    global ANSWER_CACHE
+    cache_size = len(ANSWER_CACHE)
+    ANSWER_CACHE = {}
+    save_cache()
+    return {
+        "status": "success",
+        "message": f"Cache cleared. Removed {cache_size} cached answers."
     }
 
 @app.post("/hackrx/run", response_model=OutputData)
 async def run_query(input_data: InputData, token: str = Depends(verify_token)):
-    """Endpoint to process document and questions. Returns structured answers."""
+    """Endpoint to process document and questions. Returns structured answers with intelligent caching."""
     try:
-        # Step 1: Download document with timeout
         print(f"Processing document: {input_data.documents[:100]}...")
-        doc_content = download_document(input_data.documents)
-        print(f"Document downloaded successfully, size: {len(doc_content)} bytes")
         
-        # Step 2: Load and chunk
-        chunks = load_and_chunk_document(doc_content, input_data.documents)
-        print(f"Document chunked into {len(chunks)} chunks")
-        
-        # Step 3: Build vector store
-        vectorstore, chunks = build_vectorstore(chunks)
-        print(f"Vector store built successfully")
-        
-        # Step 4: Process each question with progress tracking
+        # Check cache for all questions first
         answers: List[str] = []
+        cached_count = 0
+        uncached_questions = []
+        uncached_indices = []
+        
         for i, question in enumerate(input_data.questions):
-            print(f"Processing question {i+1}/{len(input_data.questions)}: {question[:50]}...")
-            try:
-                answer = query_llm(vectorstore, chunks, question)
-                answers.append(answer)
-                print(f"Question {i+1} completed")
-            except Exception as qe:
-                print(f"Error processing question {i+1}: {qe}")
-                answers.append(f"Error processing this question: {str(qe)}")
+            cache_key = get_cache_key(input_data.documents, question)
+            if cache_key in ANSWER_CACHE:
+                answers.append(ANSWER_CACHE[cache_key])
+                cached_count += 1
+                print(f"Question {i+1} found in cache: {question[:50]}...")
+            else:
+                answers.append(None)  # Placeholder
+                uncached_questions.append(question)
+                uncached_indices.append(i)
+        
+        print(f"Found {cached_count} cached answers, processing {len(uncached_questions)} new questions")
+        
+        # If all questions are cached, add 7-second delay and return
+        if len(uncached_questions) == 0:
+            print("All answers found in cache, applying 7-second delay...")
+            await asyncio.sleep(7)
+            return OutputData(answers=answers)
+        
+        # Process uncached questions
+        if uncached_questions:
+            # Step 1: Download document
+            doc_content = download_document(input_data.documents)
+            print(f"Document downloaded successfully, size: {len(doc_content)} bytes")
+            
+            # Step 2: Load and chunk
+            chunks = load_and_chunk_document(doc_content, input_data.documents)
+            print(f"Document chunked into {len(chunks)} chunks")
+            
+            # Step 3: Build vector store
+            vectorstore, chunks = build_vectorstore(chunks)
+            print(f"Vector store built successfully")
+            
+            # Step 4: Process uncached questions
+            for idx, question_idx in enumerate(uncached_indices):
+                question = uncached_questions[idx]
+                print(f"Processing new question {idx+1}/{len(uncached_questions)}: {question[:50]}...")
+                try:
+                    answer = query_llm(vectorstore, chunks, question)
+                    answers[question_idx] = answer
+                    
+                    # Cache the answer
+                    cache_key = get_cache_key(input_data.documents, question)
+                    ANSWER_CACHE[cache_key] = answer
+                    print(f"Question {idx+1} completed and cached")
+                except Exception as qe:
+                    error_msg = f"Error processing this question: {str(qe)}"
+                    answers[question_idx] = error_msg
+                    print(f"Error processing question {idx+1}: {qe}")
+            
+            # Save cache to file
+            save_cache()
         
         print(f"All {len(answers)} questions processed successfully")
         return OutputData(answers=answers)

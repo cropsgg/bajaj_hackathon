@@ -48,11 +48,22 @@ def load_and_chunk_document(content: bytes, url: str) -> list:
         raise ValueError(f"Unsupported format: {ext}. Supported formats: pdf, docx, eml, msg")
     os.remove(tmp_path)  # Clean up
 
-    # Enhanced chunking for better context capture - structure-aware splitting for policies
+    # Enhanced chunking for better context capture - adaptive chunk size based on document size
+    total_text_length = sum(len(doc.page_content) for doc in docs)
+    
+    if total_text_length > 200000:  # Very large documents (like academic texts)
+        chunk_size = 800
+        chunk_overlap = 200
+        print(f"Using smaller chunks for large document (total length: {total_text_length})")
+    else:  # Normal documents (like insurance policies)
+        chunk_size = 1500
+        chunk_overlap = 300
+        print(f"Using standard chunks for document (total length: {total_text_length})")
+    
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1500,  # Larger for full clauses
-        chunk_overlap=300,  # More overlap to bridge splits
-        separators=['\n\n', '\n', '.', 'Section ', 'Clause ', 'Article ', 'Policy ', 'Sub-limit ']  # Custom for insurance docs
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        separators=['\n\n', '\n', '.', 'Section ', 'Clause ', 'Article ', 'Policy ', 'Sub-limit ']  # Custom for various docs
     )
     chunks = splitter.split_documents(docs)
     return chunks
@@ -74,9 +85,16 @@ def query_llm(vectorstore: FAISS, chunks: list, question: str) -> str:
             request_timeout=25  # Shorter timeout
         )
         
-        # Use simple semantic retrieval only for Railway stability
-        retriever = vectorstore.as_retriever(search_kwargs={"k": 3})  # Smaller k for speed
-        print("Using simple semantic retrieval for Railway deployment")
+        # Adaptive retrieval based on vector store size
+        total_chunks = len(chunks)
+        if total_chunks > 500:  # Large document
+            k_value = 2  # Use fewer chunks for large documents
+            print(f"Using reduced retrieval for large document ({total_chunks} chunks, k={k_value})")
+        else:  # Normal document
+            k_value = 3  # Standard retrieval
+            print(f"Using standard retrieval for document ({total_chunks} chunks, k={k_value})")
+            
+        retriever = vectorstore.as_retriever(search_kwargs={"k": k_value})
         
         qa_chain = RetrievalQA.from_chain_type(
             llm=llm,
