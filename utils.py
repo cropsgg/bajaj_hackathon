@@ -52,10 +52,14 @@ def load_and_chunk_document(content: bytes, url: str) -> list:
     total_text_length = sum(len(doc.page_content) for doc in docs)
     
     if total_text_length > 200000:  # Very large documents (like academic texts)
-        chunk_size = 800
-        chunk_overlap = 200
+        chunk_size = 600  # More aggressive chunking for Railway
+        chunk_overlap = 150
         print(f"Using smaller chunks for large document (total length: {total_text_length})")
-    else:  # Normal documents (like insurance policies)
+    elif total_text_length > 100000:  # Medium documents
+        chunk_size = 1000  # Reduced size for Railway optimization
+        chunk_overlap = 200
+        print(f"Using medium chunks for document (total length: {total_text_length})")
+    else:  # Small documents (like insurance policies)
         chunk_size = 1500
         chunk_overlap = 300
         print(f"Using standard chunks for document (total length: {total_text_length})")
@@ -77,12 +81,12 @@ def build_vectorstore(chunks: list) -> tuple:
 def query_llm(vectorstore: FAISS, chunks: list, question: str) -> str:
     """Simplified query LLM for Railway deployment stability."""
     try:
-        # Simplified LLM configuration for Railway
+        # Optimized LLM configuration for Railway deployment
         llm = ChatOpenAI(
             model="gpt-3.5-turbo", 
             temperature=0, 
-            max_tokens=300,  # Reduced for faster response
-            request_timeout=25  # Shorter timeout
+            max_tokens=200,  # Further reduced for faster response
+            request_timeout=15  # Shorter timeout for Railway
         )
         
         # Adaptive retrieval based on vector store size

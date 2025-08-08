@@ -178,6 +178,10 @@ async def run_query(input_data: InputData, token: str = Depends(verify_token)):
         
         # Process uncached questions
         if uncached_questions:
+            # Early timeout check for Railway deployment
+            if len(uncached_questions) > 3:
+                print(f"Warning: {len(uncached_questions)} uncached questions detected. Processing with Railway optimizations.")
+            
             # Step 1: Download document
             doc_content = download_document(input_data.documents)
             print(f"Document downloaded successfully, size: {len(doc_content)} bytes")
@@ -190,18 +194,35 @@ async def run_query(input_data: InputData, token: str = Depends(verify_token)):
             vectorstore, chunks = build_vectorstore(chunks)
             print(f"Vector store built successfully")
             
-            # Step 4: Process uncached questions
+            # Step 4: Process uncached questions with Railway timeout protection
+            import concurrent.futures
+            from functools import partial
+            
+            def process_single_question(vectorstore, chunks, question):
+                """Process a single question with timeout protection."""
+                return query_llm(vectorstore, chunks, question)
+            
             for idx, question_idx in enumerate(uncached_indices):
                 question = uncached_questions[idx]
                 print(f"Processing new question {idx+1}/{len(uncached_questions)}: {question[:50]}...")
                 try:
-                    answer = query_llm(vectorstore, chunks, question)
-                    answers[question_idx] = answer
-                    
-                    # Cache the answer
-                    cache_key = get_cache_key(input_data.documents, question)
-                    ANSWER_CACHE[cache_key] = answer
-                    print(f"Question {idx+1} completed and cached")
+                    # Use ThreadPoolExecutor with timeout for Railway deployment
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                        # Submit the task with 18-second timeout for Railway
+                        future = executor.submit(process_single_question, vectorstore, chunks, question)
+                        try:
+                            answer = future.result(timeout=18)  # 18-second timeout per question
+                            answers[question_idx] = answer
+                            
+                            # Cache the answer
+                            cache_key = get_cache_key(input_data.documents, question)
+                            ANSWER_CACHE[cache_key] = answer
+                            print(f"Question {idx+1} completed and cached")
+                        except concurrent.futures.TimeoutError:
+                            future.cancel()
+                            timeout_msg = "Processing timeout. Please try again or contact support for complex queries."
+                            answers[question_idx] = timeout_msg
+                            print(f"Question {idx+1} timed out after 18 seconds")
                 except Exception as qe:
                     error_msg = f"Error processing this question: {str(qe)}"
                     answers[question_idx] = error_msg
